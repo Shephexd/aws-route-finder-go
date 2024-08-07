@@ -67,6 +67,21 @@ type RouteFinder struct {
 	endpointMap map[string]map[string]interface{}
 }
 
+func isPrivateIP(ip string) bool {
+	privateIPBlocks := []*net.IPNet{
+		{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+		{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)},
+		{IP: net.IPv4(192, 168, 0, 0), Mask: net.CIDRMask(16, 32)},
+	}
+	parsedIP := net.ParseIP(ip)
+	for _, block := range privateIPBlocks {
+		if block.Contains(parsedIP) {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveToIP(address string) (string, error) {
 	if net.ParseIP(address) != nil {
 		return address, nil
@@ -92,7 +107,7 @@ func NewRouteFinder(cfg aws.Config) *RouteFinder {
 	return rf
 }
 
-func (rf *RouteFinder) Load() {
+func (rf *RouteFinder) LoadResources() {
 	rf.RegisterInstances()
 	rf.RegisterENI()
 }
@@ -260,33 +275,86 @@ func (rf *RouteFinder) Run(nipInput *ec2.CreateNetworkInsightsPathInput) *ec2.St
 	return niaOutput
 }
 
+func (rf *RouteFinder) GetInstanceByID(instanceID string) (*types.Instance, error) {
+	describeEC2Input := &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	}
+
+	result, err := rf.proxy.DescribeInstances(context.TODO(), describeEC2Input)
+	if err != nil {
+		log.Fatalf("failed to describe instances, %v", err)
+	}
+	if len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+		instance := result.Reservations[0].Instances[0]
+		return &instance, nil
+	}
+	return &types.Instance{}, errors.New("no ENI Found")
+}
+
+func (rf *RouteFinder) GetENIbyID(networkInterfaceID string) (*types.NetworkInterface, error) {
+	DescribeENIInput := &ec2.DescribeNetworkInterfacesInput{
+		NetworkInterfaceIds: []string{networkInterfaceID},
+	}
+	result, err := rf.proxy.DescribeNetworkInterfaces(context.TODO(), DescribeENIInput)
+	if err != nil {
+		log.Fatalf("failed to describe network interfaces, %v", err)
+	}
+
+	for _, eniObj := range result.NetworkInterfaces {
+		return &eniObj, nil
+	}
+	return &types.NetworkInterface{}, errors.New("no ENI Found")
+}
+
+func (rf *RouteFinder) GetENIbyIPAddress(ipAddress string) (*types.NetworkInterface, error) {
+	filterName := ""
+	if isPrivateIP(ipAddress) {
+		filterName = "addresses.private-ip-address"
+	} else {
+		filterName = "association.public-ip"
+	}
+
+	DescribeENIInput := &ec2.DescribeNetworkInterfacesInput{
+		Filters: []types.Filter{
+			{
+				Name:   aws.String(filterName),
+				Values: []string{ipAddress},
+			},
+		},
+	}
+	result, err := rf.proxy.DescribeNetworkInterfaces(context.TODO(), DescribeENIInput)
+	if err != nil {
+		log.Fatalf("failed to describe network interfaces, %v", err)
+	}
+
+	for _, eniObj := range result.NetworkInterfaces {
+		return &eniObj, nil
+	}
+	return &types.NetworkInterface{}, errors.New("no ENI Found")
+}
+
 func (rf *RouteFinder) GetSource(sourceId string) (Endpoint, error) {
 	source := Endpoint{}
 
-	if strings.HasPrefix(sourceId, "i") {
-		instance, ok := rf.instanceMap[sourceId]
-		if ok {
-			return Endpoint{ID: instance.ID, Type: EC2}, nil
-		} else {
-			fmt.Println("Not registered EC2 on AWS")
+	if strings.HasPrefix(sourceId, "i-") {
+		instance, err := rf.GetInstanceByID(sourceId)
+		if err != nil {
 			return source, errors.New("not registered EC2 on AWS")
 		}
-	} else if strings.HasPrefix(sourceId, "eni") {
-		eni, ok := rf.eniMap[sourceId]
-		if ok {
-			return Endpoint{ID: eni.ID, Type: ENI}, nil
-		} else {
-			fmt.Println("Not registered ENI on AWS")
+		return Endpoint{ID: *instance.InstanceId, Type: EC2}, nil
+
+	} else if strings.HasPrefix(sourceId, "eni-") {
+		eni, err := rf.GetENIbyID(sourceId)
+		if err != nil {
 			return source, errors.New("not registered ENI on AWS")
 		}
+		return Endpoint{ID: *eni.NetworkInterfaceId, Type: ENI}, nil
 	} else if IsIPAddress(sourceId) {
-		eni, ok := rf.ipMap[sourceId]
-		if ok {
-			return Endpoint{ID: eni.ID, Type: ENI}, nil
-		} else {
-			fmt.Println("Not registered IP on AWS")
+		eni, err := rf.GetENIbyIPAddress(sourceId)
+		if err != nil {
 			return source, errors.New("not registered IP on AWS")
 		}
+		return Endpoint{ID: *eni.NetworkInterfaceId, Type: ENI}, nil
 	}
 	return source, nil
 }
@@ -294,21 +362,18 @@ func (rf *RouteFinder) GetSource(sourceId string) (Endpoint, error) {
 func (rf *RouteFinder) GetDestination(destinationId string) (Endpoint, error) {
 	destination := Endpoint{}
 	if strings.HasPrefix(destinationId, "i-") {
-		instance, ok := rf.instanceMap[destinationId]
-		if ok {
-			return Endpoint{ID: instance.ID, Type: EC2}, nil
-		} else {
-			fmt.Println("Not registered EC2 on AWS")
+		instance, err := rf.GetInstanceByID(destinationId)
+		if err != nil {
 			return destination, errors.New("not registered EC2 on AWS")
 		}
+		return Endpoint{ID: *instance.InstanceId, Type: EC2}, nil
+
 	} else if strings.HasPrefix(destinationId, "eni-") {
-		eni, ok := rf.eniMap[destinationId]
-		if ok {
-			return Endpoint{ID: eni.ID, Type: ENI}, nil
-		} else {
-			fmt.Println("Not registered ENI on AWS")
+		eni, err := rf.GetENIbyID(destinationId)
+		if err != nil {
 			return destination, errors.New("not registered ENI on AWS")
 		}
+		return Endpoint{ID: *eni.NetworkInterfaceId, Type: ENI}, nil
 	} else if IsIPAddress(destinationId) {
 		return Endpoint{ID: destinationId, Type: IP}, nil
 	}
@@ -335,13 +400,14 @@ example: arf run sourceIPOnAWS targetIP --protocol tcp --port 800
 `,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("ap-northeast-2"))
+		region, _ := cmd.Flags().GetString("region")
+
+		cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
 		if err != nil {
 			fmt.Println("Error loading configuration:", err)
 			return
 		}
 		rf := NewRouteFinder(cfg)
-		rf.Load()
 
 		source, err := rf.GetSource(args[0])
 		if err != nil {
@@ -361,14 +427,17 @@ example: arf run sourceIPOnAWS targetIP --protocol tcp --port 800
 		nia := rf.Run(nip)
 		niaResult := rf.GetAnalysisResult(*nia.NetworkInsightsAnalysis.NetworkInsightsAnalysisId)
 		if *niaResult.NetworkPathFound {
-			fmt.Println("- Reachability OK: Network Route Found")
+			fmt.Println("- Reachability OK! Network Route Found")
 		} else {
-			fmt.Println("- Reachability Not OK: Fail to find Network Route")
+			fmt.Println("- Reachability Not OK... Fail to find Network Route")
 			for idx, e := range niaResult.Explanations {
 				fmt.Println("- Explanation", idx+1, ": ", *e.ExplanationCode)
 			}
 		}
 
+		if len(niaResult.ReturnPathComponents) == 0 {
+			fmt.Println("- Only For Forward Path, An unidirectional path will be shown if analysis involves Transit Gateway.")
+		}
 		consoleURL := fmt.Sprintf("https://console.aws.amazon.com/networkinsights/home?#NetworkPathAnalysis:analysisId=%s",
 			*nia.NetworkInsightsAnalysis.NetworkInsightsAnalysisId)
 		fmt.Println("Detail Information in Console URL:", consoleURL)
