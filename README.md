@@ -31,6 +31,15 @@ go run main.go run eni-123123412 i-1233258767 --protocol udp --port 8000
 go run main.go run eni-123123412 www.example.com --protocol udp --port 8000
 ```
 
+### Result
+```bash
+> RouteFinder start analysis from eni-0xxxxxx to www.example.com through(udp(8000))
+> Analyzing......
+Analysis Result
+- Reachability OK! Network Route Found
+- Only For Forward Path, An unidirectional path will be shown if analysis involves Transit Gateway.
+Detail Information in Console URL: https://console.aws.amazon.com/networkinsights/home?#NetworkPathAnalysis:analysisId=nia-xxxxxx
+```
 
 ## Interfaces
 #### Source Types
