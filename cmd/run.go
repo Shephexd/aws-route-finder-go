@@ -384,7 +384,6 @@ func (rf *RouteFinder) GetDestination(destinationId string) (Endpoint, error) {
 func IsIPAddress(ip string) bool {
 	trial := net.ParseIP(ip)
 	if trial.To4() == nil {
-		fmt.Printf("%v is not an IPv4 address\n", trial)
 		return false
 	}
 	return true
